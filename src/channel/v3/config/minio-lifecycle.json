@@ -1,0 +1,57 @@
+# MinIO 生命周期策略配置
+# 用于自动归档和删除旧的支付截图
+
+# 使用 mc (MinIO Client) 命令配置生命周期策略
+
+# 1. 配置 MinIO 别名
+# mc alias set myminio http://minio.example.com:9000 AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+# 2. 创建存储桶（如果不存在）
+# mc mb myminio/wepay-ocr-images
+
+# 3. 设置生命周期策略
+# mc ilm add --expiry-days 180 myminio/wepay-ocr-images
+
+# 生命周期策略 JSON 配置文件
+{
+  "Rules": [
+    {
+      "ID": "ocr-images-lifecycle",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "ocr/"
+      },
+      "Expiration": {
+        "Days": 180
+      },
+      "Transition": {
+        "Days": 90,
+        "StorageClass": "GLACIER"
+      }
+    },
+    {
+      "ID": "ocr-thumbnails-lifecycle",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "ocr/",
+        "Tag": {
+          "Key": "type",
+          "Value": "thumbnail"
+        }
+      },
+      "Expiration": {
+        "Days": 90
+      }
+    },
+    {
+      "ID": "temp-files-cleanup",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "temp/"
+      },
+      "Expiration": {
+        "Days": 7
+      }
+    }
+  ]
+}

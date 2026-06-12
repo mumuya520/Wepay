@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WePay HTTP 调用示例 - 浏览器</title>
+    <script src="https://cdn.jsdelivr.net/npm/crypto-js@4.1.0/crypto-js.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 30px;
+        }
+
+        .section {
+            margin-bottom: 30px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .section h2 {
+            color: #333;
+            font-size: 18px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-weight: 500;
+        }
+
+        input, select, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            font-family: monospace;
+        }
+
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .button-group button {
+            flex: 1;
+            min-width: 150px;
+        }
+
+        .result {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .result.success {
+            background: #e8f5e9;
+            border-color: #4caf50;
+            color: #2e7d32;
+        }
+
+        .result.error {
+            background: #ffebee;
+            border-color: #f44336;
+            color: #c62828;
+        }
+
+        .result.info {
+            background: #e3f2fd;
+            border-color: #2196f3;
+            color: #1565c0;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+
+        .status.success {
+            background: #4caf50;
+            color: white;
+        }
+
+        .status.error {
+            background: #f44336;
+            color: white;
+        }
+
+        .status.pending {
+            background: #ff9800;
+            color: white;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .button-group {
+                flex-direction: column;
+            }
+
+            .button-group button {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎉 WePay HTTP 调用示例</h1>
+            <p>浏览器中直接调用 WePay API</p>
+        </div>
+
+        <div class="content">
+            <!-- 配置信息 -->
+            <div class="section">
+                <h2>📋 配置信息</h2>
+                <div class="grid">
+                    <div class="form-group">
+                        <label>商户号</label>
+                        <input type="text" id="mchId" value="M515637" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>商户密钥</label>
+                        <input type="text" id="mchKey" value="nca3twhvpqveixu2hdeutb6utpiet6k7" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>API 基础 URL</label>
+                        <input type="text" id="baseUrl" value="http://127.0.0.1:8088" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>签名方式</label>
+                        <select id="signType">
+                            <option value="MD5">MD5</option>
+                            <option value="RSA">RSA</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 统一下单 -->
+            <div class="section">
+                <h2>💳 统一下单</h2>
+                <div class="grid">
+                    <div class="form-group">
+                        <label>商户订单号</label>
+                        <input type="text" id="outTradeNo" placeholder="自动生成" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>支付方式</label>
+                        <select id="payType">
+                            <option value="wxpay">微信支付</option>
+                            <option value="alipay">支付宝</option>
+                            <option value="qqpay">QQ 钱包</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>订单金额</label>
+                        <input type="text" id="amount" value="0.01">
+                    </div>
+                    <div class="form-group">
+                        <label>订单标题</label>
+                        <input type="text" id="subject" value="浏览器测试订单">
+                    </div>
+                </div>
+                <button onclick="createOrder()">📤 统一下单</button>
+                <div id="createOrderResult"></div>
+            </div>
+
+            <!-- 查询订单 -->
+            <div class="section">
+                <h2>🔍 查询订单</h2>
+                <div class="form-group">
+                    <label>商户订单号</label>
+                    <input type="text" id="queryOutTradeNo" placeholder="输入要查询的订单号">
+                </div>
+                <button onclick="queryOrder()">🔎 查询订单</button>
+                <div id="queryOrderResult"></div>
+            </div>
+
+            <!-- 异步通知验证 -->
+            <div class="section">
+                <h2>✅ 异步通知验证</h2>
+                <div class="form-group">
+                    <label>通知参数 (JSON)</label>
+                    <textarea id="notifyData" rows="5">{
+  "trade_no": "W20260530152204174895",
+  "out_trade_no": "order_test_123",
+  "amount": "0.01",
+  "status": "1",
+  "pay_type": "wxpay"
+}</textarea>
+                </div>
+                <button onclick="verifyNotify()">🔐 验证签名</button>
+                <div id="verifyNotifyResult"></div>
+            </div>
+
+            <!-- 批量测试 -->
+            <div class="section">
+                <h2>🧪 批量测试</h2>
+                <p style="margin-bottom: 15px; color: #666;">测试不同支付方式的下单功能</p>
+                <button onclick="testAllPayTypes()">🚀 测试所有支付方式</button>
+                <div id="testAllResult"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const MCH_ID = 'M515637';
+        const MCH_KEY = 'nca3twhvpqveixu2hdeutb6utpiet6k7';
+        const BASE_URL = 'http://127.0.0.1:8088';
+
+        // MD5 签名
+        function signMd5(params) {
+            const sorted = Object.keys(params)
+                .filter(k => k !== 'sign' && k !== 'sign_type' && params[k])
+                .sort()
+                .map(k => `${k}=${params[k]}`)
+                .join('&');
+            
+            const signStr = sorted + MCH_KEY;
+            return CryptoJS.MD5(signStr).toString();
+        }
+
+        // 显示结果
+        function showResult(elementId, data, isError = false) {
+            const element = document.getElementById(elementId);
+            element.className = `result ${isError ? 'error' : 'success'}`;
+            element.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+        }
+
+        // 统一下单
+        async function createOrder() {
+            const outTradeNo = `order_browser_${Date.now()}`;
+            document.getElementById('outTradeNo').value = outTradeNo;
+
+            const params = {
+                mch_id: MCH_ID,
+                out_trade_no: outTradeNo,
+                pay_type: document.getElementById('payType').value,
+                amount: document.getElementById('amount').value,
+                subject: document.getElementById('subject').value,
+                sign_type: 'MD5'
+            };
+
+            params.sign = signMd5(params);
+
+            try {
+                const response = await fetch(`${BASE_URL}/gateway/create`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(params)
+                });
+
+                const result = await response.json();
+                showResult('createOrderResult', result, result.code !== 1);
+            } catch (error) {
+                showResult('createOrderResult', `错误: ${error.message}`, true);
+            }
+        }
+
+        // 查询订单
+        async function queryOrder() {
+            const outTradeNo = document.getElementById('queryOutTradeNo').value;
+            if (!outTradeNo) {
+                showResult('queryOrderResult', '请输入订单号', true);
+                return;
+            }
+
+            const params = {
+                mch_id: MCH_ID,
+                out_trade_no: outTradeNo,
+                sign_type: 'MD5'
+            };
+
+            params.sign = signMd5(params);
+
+            try {
+                const response = await fetch(`${BASE_URL}/gateway/query`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(params)
+                });
+
+                const result = await response.json();
+                showResult('queryOrderResult', result, result.code !== 1);
+            } catch (error) {
+                showResult('queryOrderResult', `错误: ${error.message}`, true);
+            }
+        }
+
+        // 验证异步通知
+        function verifyNotify() {
+            try {
+                const notifyData = JSON.parse(document.getElementById('notifyData').value);
+                const sign = signMd5(notifyData);
+                
+                const result = {
+                    notifyData,
+                    generatedSign: sign,
+                    message: '签名已生成，可用于验证异步通知'
+                };
+
+                showResult('verifyNotifyResult', result);
+            } catch (error) {
+                showResult('verifyNotifyResult', `错误: ${error.message}`, true);
+            }
+        }
+
+        // 测试所有支付方式
+        async function testAllPayTypes() {
+            const payTypes = ['wxpay', 'alipay', 'qqpay'];
+            const results = [];
+
+            for (const payType of payTypes) {
+                const outTradeNo = `order_${payType}_${Date.now()}`;
+                const params = {
+                    mch_id: MCH_ID,
+                    out_trade_no: outTradeNo,
+                    pay_type: payType,
+                    amount: '0.01',
+                    subject: `${payType} 测试`,
+                    sign_type: 'MD5'
+                };
+
+                params.sign = signMd5(params);
+
+                try {
+                    const response = await fetch(`${BASE_URL}/gateway/create`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(params)
+                    });
+
+                    const result = await response.json();
+                    results.push({
+                        payType,
+                        success: result.code === 1,
+                        tradeNo: result.trade_no,
+                        message: result.msg
+                    });
+                } catch (error) {
+                    results.push({
+                        payType,
+                        success: false,
+                        message: error.message
+                    });
+                }
+            }
+
+            showResult('testAllResult', results);
+        }
+
+        // 初始化
+        document.getElementById('outTradeNo').value = `order_browser_${Date.now()}`;
+    </script>
+</body>
+</html>

@@ -1,0 +1,74 @@
+# WePay V3 配置文件
+
+# 基础配置
+base_url: "https://your-domain.com"
+heartbeat_interval: 10      # 心跳间隔（秒）
+heartbeat_timeout: 180      # 心跳超时（秒）
+order_timeout: 300          # 订单超时（秒）
+
+# 安全配置
+security:
+  enable_hmac: true
+  enable_rsa: false
+  hmac_secret: "your-hmac-secret-key-change-me"
+  rsa_public_key: ""
+  timestamp_window: 300     # 时间戳窗口（秒）
+  max_devices: 100          # 最大设备数
+  ip_whitelist:             # IP白名单（为空则不限制）
+    # - "192.168.1.100"
+    # - "10.0.0.50"
+
+# RocketMQ配置
+rocketmq:
+  namesrv_addr: "127.0.0.1:9876"
+  order_push_topic: "wepay_order_push"
+  ocr_task_topic: "wepay_ocr_task"
+  email_notify_topic: "wepay_email_notify"
+  alert_notify_topic: "wepay_alert_notify"
+  order_timeout_topic: "wepay_order_timeout"
+  device_status_topic: "wepay_device_status"
+
+# 邮件配置
+email:
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  username: "your-email@gmail.com"
+  password: "your-app-password"
+  from_email: "noreply@wepay.com"
+  from_name: "WePay V3 支付系统"
+  use_ssl: true
+  template_path: "./templates"
+
+# Redis配置
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  database: 0
+  pool_size: 10
+
+# MinIO配置
+minio:
+  endpoint: "http://127.0.0.1:9000"
+  access_key: "minioadmin"
+  secret_key: "minioadmin"
+  bucket: "wepay"
+  use_ssl: false
+
+# 数据库配置
+database:
+  host: "127.0.0.1"
+  port: 3306
+  username: "root"
+  password: "password"
+  database: "wepay_v3"
+  charset: "utf8mb4"
+  pool_size: 10
+
+# 日志配置
+logging:
+  level: "info"           # debug / info / warn / error
+  file: "./logs/wepay_v3.log"
+  max_size: 100           # MB
+  max_backups: 10
+  max_age: 30             # 天

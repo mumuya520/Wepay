@@ -1,0 +1,465 @@
+WePay V3 完整架构图（更新于 2026-05）
+================================================================================
+
+一、整体分层架构
+================================================================================
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  客户端层（监控设备端）                                                       │
+│  设备1 / 设备2 / 设备N （Android/Windows 通知监听 + 支付截图采集）             │
+│                                                                               │
+│  内置能力：                                                                   │
+│  ├─ DeviceID 生成与持久化（首次运行写入本地存储）                             │
+│  ├─ HMAC-SHA256 签名生成器（所有请求强制签名）                                │
+│  ├─ RSA 非对称签名（可选，更高安全级别）                                      │
+│  ├─ WebSocket 长连接（含心跳保活 + 断线自动重连）                             │
+│  ├─ 待单 HTTP 轮询（WS 断线时自动降级到 /pending）                            │
+│  └─ 设备状态上报：电量 / 网络类型 / App版本 / 屏幕分辨率                     │
+│                                                                               │
+│  两种收款监听模式：                                                           │
+│  ├─ 【主动推单模式】服务端创建订单 → WS 推到设备 → 设备展示收款码            │
+│  │   → 顾客支付 → 设备收到通知 → 调用 /push 上报（带 orderId）               │
+│  └─ 【通知栏监听模式】顾客扫固定收款码支付 → 微信/支付宝推通知              │
+│       → 设备通知栏监听（AccessibilityService）捕获金额                        │
+│       → 调用 /notify 上报（不带 orderId，由服务端反查匹配）                  │
+└────────────────────┬──────────────────────────────┬───────────────────────────┘
+                     │ HTTP POST V3协议               │ WebSocket wss://
+                     ▼                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  接入网关层（设备端 HTTP/WS 接口）                                            │
+│                                                                               │
+│  设备注册/管理：                                                              │
+│  ├─ POST /api/wepay/v3/device/register  设备注册（首次）                     │
+│  └─ POST /api/wepay/v3/device/unbind    设备解绑                             │
+│                                                                               │
+│  心跳 & 状态：                                                                │
+│  └─ POST /api/wepay/v3/heart            心跳上报（电量/网络/版本）            │
+│                                                                               │
+│  支付通知上报（两种模式）：                                                   │
+│  ├─ POST /api/wepay/v3/push   【主动确认】设备持有 orderId，直接上报结果     │
+│  ├─ POST /api/wepay/v3/notify 【通知栏】只有金额+支付类型，服务端反查匹配   │
+│  └─ POST /api/wepay/v3/pending          查询待推送订单（WS断线兜底）          │
+│                                                                               │
+│  OCR 截图：                                                                   │
+│  └─ POST /api/wepay/v3/ocr              上传支付截图，服务端识别金额          │
+│                                                                               │
+│  WebSocket：                                                                  │
+│  └─ ws(s)://host/api/wepay/v3/ws        双向推单通道（含心跳/确认/重连）      │
+│                                                                               │
+│  手动回调：                                                                   │
+│  └─ GET  /api/wepay/v3/callback/manual  邮件链接点击触发手动回调              │
+│                                                                               │
+│  系统：                                                                       │
+│  ├─ GET  /health                        健康检查（负载均衡探活）              │
+│  └─ GET  /metrics                       Prometheus 指标采集                   │
+│                                                                               │
+│  基础拦截：防CC/滑动窗口限流 | JSON校验 | CORS | 请求日志                    │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  V3 安全校验层（核心风控）                                                    │
+│  1. IP白名单校验              2. 时间戳防重放窗口（可配置）                   │
+│  3. Nonce全局去重             4. HMAC-SHA256 签名验签（默认）                 │
+│  5. RSA非对称签名验签（可选，设备持有私钥，服务端持有公钥）                   │
+│  6. DeviceID 注册&数量上限    7. 非法请求日志审计                             │
+└──────────────┬──────────────────────────────────────────────────┬─────────────┘
+               │ 校验通过                                         │ 校验失败
+               ▼                                                  ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  业务逻辑层（WePay V3 插件核心）                                              │
+│                                                                               │
+│ ├─ 心跳服务                                                                   │
+│ │   在线状态/最后心跳/设备信息/电量/网络/版本 实时上报                        │
+│ │   离线检测：定时任务每30s扫描，超时>180s标记离线 → 触发告警                │
+│ │                                                                             │
+│ ├─ 支付通知服务（双模式）                                                     │
+│ │   ┌─ 主动确认模式（/push）：                                               │
+│ │   │   设备持有 orderId → 服务端精确匹配 → 金额强校验 → 幂等入账            │
+│ │   │   状态机：PENDING → PUSHING → PAID / FAILED / TIMEOUT                 │
+│ │   └─ 通知栏监听模式（/notify）：                                           │
+│ │       设备只上报 payType + amount + remark（无orderId）                    │
+│ │       服务端查询该设备所有绑定商户的 PENDING 订单                          │
+│ │       → 按金额+支付类型 FIFO 匹配最旧订单 → 标记 PAID → 触发回调          │
+│ │       → 未匹配记录日志（供人工对账）                                       │
+│ │                                                                             │
+│ ├─ WebSocket推单                                                              │
+│ │   新订单创建 → 主动推设备（无需轮询pending）                                │
+│ │   连接管理：心跳保活、断线重连、消息确认                                    │
+│ │   多实例：Redis Pub/Sub 跨实例转发，连接信息持久化到 Redis                  │
+│ │   降级：WS断线时设备自动切换 HTTP 轮询 /pending                             │
+│ │                                                                             │
+│ ├─ OCR服务                                                                    │
+│ │   截图上传 → SHA256去重缓存 → Tesseract/PaddleOCR识别金额                  │
+│ │   截图存 MinIO（留存凭证/生成缩略图）                                       │
+│ │   识别结果缓存：相同图片hash跳过重复识别（Redis STRING, TTL=24h）           │
+│ │                                                                             │
+│ ├─ 多商户路由                                                                 │
+│ │   一台设备绑定多个商户（v3_device_merchant表）                               │
+│ │   商户隔离：不同商户订单/收款码/配置互不干扰                                │
+│ │                                                                             │
+│ ├─ 邮件通知 & 手动回调                                                        │
+│ │   支付成功/失败/超时 → SMTP邮件通知商户                                     │
+│ │   每日10:00汇总失败订单邮件                                                 │
+│ │   邮件内嵌手动回调链接（HMAC签名，24h有效）                                 │
+│ │   /api/wepay/v3/callback/manual → 重新触发商户回调                         │
+│ │                                                                             │
+│ ├─ 告警推送（AlertNotification）                                              │
+│ │   触发条件：设备离线 / 订单超时 / 安全事件 / 系统错误                       │
+│ │   推送渠道：钉钉Webhook / 企业微信Webhook / SMTP邮件                        │
+│ │   防抖：延迟消息30分钟内同类型不重复推送                                    │
+│ │   配置：通过管理后台 /admin/api/v3/alert/config 动态调整                    │
+│ │                                                                             │
+│ ├─ 灰度发布（GrayscaleManager）                                               │
+│ │   按设备ID / 商户ID / 百分比 / 白名单灰度新协议版本                          │
+│ │   规则存 Redis，Redis不可用时降级为全量放开                                  │
+│ │                                                                             │
+│ ├─ 限流熔断（SentinelFlowManager）                                            │
+│ │   QPS限流 / 慢调用熔断 / 异常比例熔断 / 热点参数限流                        │
+│ │   布隆过滤器：防设备ID/订单ID缓存穿透                                       │
+│ │   缓存预热：系统启动加载 IP白名单/商户配置/在线设备/系统配置                 │
+│ │                                                                             │
+│ └─ 异步任务队列（RocketMQ，可选）                                             │
+│     ├─ order-push-topic    订单推送（事务消息，失败自动重试3次）              │
+│     ├─ ocr-task-topic      OCR识别（异步，失败进死信队列）                   │
+│     ├─ image-compress-topic 截图压缩+缩略图生成                               │
+│     ├─ email-notify-topic  邮件通知（异步发送）                               │
+│     ├─ alert-notify-topic  告警推送（延迟消息防抖动）                         │
+│     ├─ order-timeout-topic 订单超时自动取消（延迟消息）                       │
+│     └─ device-status-topic 设备状态变更（顺序消息）                           │
+└──────────────┬───────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  数据持久层 & 状态存储                                                        │
+│                                                                               │
+│  SQLite/PostgreSQL 关系型数据库（10张核心表）：                               │
+│   1. v3_device          设备状态：DeviceID/IP/online/battery/network/appVersion/lastHeartbeat │
+│   2. v3_device_merchant 设备-商户绑定：device_id → merchant_id (N:M)         │
+│   3. v3_order           订单主表：order_id/merchant_order_id/merchant_id/device_id │
+│                          amount/pay_type/status/remark/pay_time/expire_at    │
+│   4. v3_system_config   系统配置：config_key/config_value（含告警Webhook）   │
+│   5. v3_ip_whitelist    IP白名单：ip_address/merchant_id/description         │
+│   6. v3_audit_log       安全审计：device_id/ip/path/sign_result/timestamp    │
+│   7. v3_order_status_log 订单状态流转：order_id/old_status/new_status/remark │
+│   8. v3_email_log       邮件发送记录：order_id/merchant_id/type/status/retry │
+│   9. v3_callback_log    手动回调记录：order_id/token/expire_at/status/client_ip │
+│  10. v3_merchant_config 商户V3配置：hmac_key/notify_email/ocr_enabled/ws_push │
+│                                                                               │
+│  Redis 缓存层（Redis不可用时自动降级为DB查询）：                              │
+│   nonce:{nonce}          Nonce去重，TTL=重放窗口（默认300s）                  │
+│   device:{deviceId}      设备在线状态 HASH（心跳时间/电量等）                 │
+│   wepay:v3:order:lock:{orderId}  订单幂等锁 STRING，TTL=1h                   │
+│   ws:device:{deviceId}   WS连接映射 STRING（serverId+连接实例）               │
+│   ws:message             Pub/Sub Channel（跨实例消息转发）                    │
+│   rate_limit:{key}       滑动窗口限流 ZSET                                    │
+│   bloom:device / bloom:order  布隆过滤器 BITMAP（防缓存穿透）                 │
+│   ocr:cache:{sha256}     OCR识别结果缓存 STRING，TTL=24h                      │
+│   grayscale:rules        灰度规则 STRING（JSON序列化）                         │
+│                                                                               │
+│  MinIO/OSS 对象存储：                                                         │
+│   ocr/{date}/{order_id}.jpg        支付截图原图（留存凭证）                   │
+│   ocr/{date}/{order_id}_thumb.jpg  截图缩略图（加速预览）                     │
+│   生命周期策略：90天归档冷存储，180天删除                                     │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  管理后台 API 层（/admin/api/v3/*，需 JWT 鉴权）                             │
+│                                                                               │
+│  实时统计：                                                                   │
+│  ├─ GET  /admin/api/v3/stats          设备总数/在线数/今日订单/今日金额       │
+│  └─ GET  /admin/api/v3/order/trend    订单趋势图数据（按小时/天分组）         │
+│                                                                               │
+│  设备管理：                                                                   │
+│  ├─ GET  /admin/api/v3/devices        设备列表（分页/筛选）                   │
+│  └─ POST /admin/api/v3/device/delete  删除设备                               │
+│                                                                               │
+│  订单管理：                                                                   │
+│  ├─ GET  /admin/api/v3/orders         订单列表（分页/状态/商户筛选）          │
+│  ├─ GET  /admin/api/v3/order/detail   订单详情+截图URL                       │
+│  ├─ GET  /admin/api/v3/order/status-log 订单状态流转日志                     │
+│  └─ POST /admin/api/v3/order/callback 手动触发商户回调                       │
+│                                                                               │
+│  系统配置：                                                                   │
+│  ├─ GET  /admin/api/v3/config         读取系统配置（HMAC密钥/重放窗口等）     │
+│  └─ POST /admin/api/v3/config         保存系统配置                           │
+│                                                                               │
+│  IP白名单：                                                                   │
+│  ├─ GET  /admin/api/v3/ip-whitelist   白名单列表                             │
+│  ├─ POST /admin/api/v3/ip-whitelist/add   新增                               │
+│  └─ POST /admin/api/v3/ip-whitelist/del   删除                               │
+│                                                                               │
+│  审计 & 日志：                                                                │
+│  ├─ GET  /admin/api/v3/audit-log      安全审计日志                           │
+│  └─ GET  /admin/api/v3/callback-log   手动回调日志                           │
+│                                                                               │
+│  商户V3配置：                                                                 │
+│  ├─ GET  /admin/api/v3/merchant-configs      商户配置列表                    │
+│  └─ POST /admin/api/v3/merchant-config/save  新增/修改商户配置               │
+│                                                                               │
+│  告警配置（存入 v3_system_config）：                                          │
+│  ├─ GET  /admin/api/v3/alert/config   读取告警Webhook配置                    │
+│  └─ POST /admin/api/v3/alert/config   保存（钉钉/企微Webhook/邮箱/开关）     │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  前端管理页面层（Vue3 + Element Plus，路由 /wepay/v3/*）                     │
+│                                                                               │
+│  /wepay/v3/monitor   实时监控大屏（统计卡片/订单趋势图/设备图/告警列表）     │
+│  /wepay/v3/devices   设备管理（列表/状态/删除/电量/网络/心跳时间）           │
+│  /wepay/v3/orders    订单管理（列表/详情/状态日志时间线/手动回调）           │
+│  /wepay/v3/qrcodes   收款码管理（上传图片自动识别/添加/启停/预览QR）         │
+│  /wepay/v3/merchant  商户V3配置（HMAC密钥/邮件通知/OCR开关）                │
+│  /wepay/v3/config    系统配置（重放窗口/最大设备数/RSA公钥/IP白名单）        │
+│  /wepay/v3/alert     告警配置（钉钉Webhook/企微Webhook/告警邮箱/事件开关）   │
+│                                                                               │
+│  插件控制台（/wepay/plugin）监听App标签页（wepay_v3专属）：                  │
+│  ├─ 接入配置：WS地址/注册地址/HMAC密钥（含QR码一键扫码配置）                │
+│  ├─ 实时统计：设备总数/在线数/今日订单/今日金额（5秒自动刷新）               │
+│  ├─ 设备列表：在线状态/电量/网络/删除按钮                                    │
+│  └─ 快捷跳转：设备管理/订单管理/收款码管理/商户配置                          │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  监控告警层（运维保障）                                                       │
+│  1. 设备离线告警：心跳超时>180s触发（钉钉/企微Webhook + SMTP邮件）           │
+│  2. 订单异常告警：超时未支付、金额不匹配                                      │
+│  3. 安全事件告警：签名验证失败、IP异常、重放攻击检测                           │
+│  4. 性能监控：接口响应时间/WS连接数/消息队列积压（预留 Prometheus）           │
+│  5. 业务指标：支付成功率/OCR识别准确率/设备在线率                             │
+│  6. 日志聚合：Drogon日志文件（预留 ELK/Loki 集成）                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+
+核心安全能力（V2 所有漏洞全部堵死 + V3 新增）
+✅ 全链路 HMAC-SHA256 签名（无密钥无法伪造）
+✅ RSA非对称签名（可选，设备私钥签名，服务端公钥验证）
+✅ 时间戳 + nonce 双重防重放（重放包直接丢弃）
+✅ 设备唯一身份认证（DeviceID + 绑定校验）
+✅ IP 白名单（可配置）
+✅ 金额强校验（不能改单）
+✅ 订单幂等（不能重复入账）
+✅ 多设备支持（不冲突）
+✅ 心跳独立维护（在线状态精准）
+✅ 严格协议格式（不兼容旧版漏洞协议）
+✅ 日志审计（可追踪每一笔）
+
+
+二、V3 协议规范（固定，不可伪造）
+
+1. 公共请求字段（所有接口必须携带）
+
+   deviceId    设备唯一ID（安装时生成并持久化）
+   timestamp   Unix秒级时间戳（服务端校验±重放窗口内）
+   nonce       随机字符串（每次请求不同，服务端去重）
+   sign        HMAC-SHA256 签名
+
+2. 设备端全部接口
+
+   POST /api/wepay/v3/device/register   设备注册
+   POST /api/wepay/v3/device/unbind     设备解绑
+   POST /api/wepay/v3/heart             心跳上报（battery/network/appVersion）
+   POST /api/wepay/v3/push             【主动确认】上报 orderId + status(PAID/FAILED)
+   POST /api/wepay/v3/notify           【通知栏】上报 payType + amount [+ remark]
+   POST /api/wepay/v3/pending           查询待推送订单（WS断线兜底）
+   POST /api/wepay/v3/ocr              上传支付截图（multipart/form-data）
+   GET  /api/wepay/v3/callback/manual  手动回调（邮件链接，含 token 签名）
+   WS   /api/wepay/v3/ws              WebSocket 双向推单通道
+
+3. 签名规则
+
+   sign = HMAC-SHA256(
+       "deviceId=xxx&nonce=xxx&timestamp=xxx&key=secret",
+       secret
+   )
+   secret = 系统配置中的 hmac_secret（或各商户独立密钥）
+
+4. /notify 通知栏接口特别说明
+
+   请求：{ deviceId, payType, amount, remark(可选), timestamp, nonce, sign }
+   响应（匹配成功）：{ matched:true, orderId, merchantOrderId, amount, payTime }
+   响应（无匹配）：  { matched:false, reason:"no pending order matches..." }
+   匹配逻辑：查询设备所有绑定商户 → 按金额+payType找最旧PENDING订单 → FIFO
+
+
+V3 新增能力
+🆕 通知栏监听模式（/notify）：设备无需持有 orderId，服务端按金额反查匹配
+🆕 WebSocket双向推送（服务端主动推单，取代设备轮询）
+🆕 WS多实例支持（Redis Pub/Sub跨实例转发 + 单实例本地映射降级）
+🆕 截图OCR上传（/api/wepay/v3/ocr，Tesseract/PaddleOCR识别金额）
+🆕 OCR结果缓存（SHA256去重，相同截图不重复识别，TTL=24h）
+🆕 支付截图存MinIO（留存凭证，可追溯）
+🆕 多商户绑定（一台设备监听多个商户，v3_device_merchant N:M映射）
+🆕 RSA非对称签名（比HMAC更安全，设备持有私钥）
+🆕 设备实时状态上报（电量/网络类型/App版本/屏幕分辨率）
+🆕 限流熔断（Sentinel QPS/慢调用/异常比例熔断）
+🆕 布隆过滤器（Redis BITMAP，防DeviceID/OrderID缓存穿透）
+🆕 缓存预热（启动时加载IP白名单/商户配置/在线设备/系统配置）
+🆕 灰度发布（GrayscaleManager，按设备/商户/百分比，Redis不可用时全量放开）
+🆕 异步任务队列（RocketMQ 7个Topic，事务消息+延迟消息+顺序消息）
+🆕 邮件通知与手动回调（SMTP邮件+带签名手动回调链接）
+🆕 告警推送（AlertNotification，钉钉/企微Webhook + 邮件，防抖30min）
+🆕 管理后台完整API（17个接口，统计/设备/订单/配置/白名单/审计/告警）
+🆕 前端管理页面（7个独立页面 + 插件控制台监控Tab）
+🆕 收款码管理（上传图片自动识别pay_url，支持微信/支付宝/QQ）
+🆕 Redis不可用降级（WS单实例模式 / 灰度全量放开 / 布隆过滤跳过）
+
+
+三、核心业务流程详解
+================================================================================
+
+【主动推单模式】完整流程：
+─────────────────────────────────────────────────────────
+ 商户下单请求
+      │
+      ▼
+ WePay 网关创建 v3_order（状态 PENDING）
+      │
+      ├─ WS在线 ──▶ WebSocketManager.pushOrderToDevice()
+      │               Redis Pub/Sub 跨实例广播
+      │               设备收到 {orderId, amount, payType, expireAt}
+      │
+      └─ WS离线 ──▶ 写 RocketMQ order-push-topic（设备轮询 /pending 兜底）
+      │
+      ▼（顾客支付后）
+ 设备收到微信/支付宝通知 → POST /api/wepay/v3/push
+      { deviceId, orderId, status:PAID, timestamp, nonce, sign }
+      │
+      ▼
+ 服务端精确匹配 orderId → 金额强校验 → 幂等检查
+      │
+      ▼
+ 更新 v3_order.status=PAID → 写 v3_order_status_log
+      │
+      ▼
+ 触发商户回调 + 发送邮件通知 + 告警（如有异常）
+
+【通知栏监听模式】完整流程：
+─────────────────────────────────────────────────────────
+ 顾客扫固定收款码（v3_qrcode 表中的码）直接支付
+      │
+      ▼
+ 微信/支付宝 App 推通知到设备通知栏
+ 设备 AccessibilityService 捕获通知内容（金额、支付方式）
+      │
+      ▼
+ POST /api/wepay/v3/notify
+      { deviceId, payType:WECHAT, amount:100.00, remark, timestamp, nonce, sign }
+      │
+      ▼
+ HMAC 验签 → 查询设备绑定的所有商户
+      │
+      ▼
+ 遍历商户 → matchOrderByAmount(merchantId, 100.00, WECHAT)
+      SQL: v3_order WHERE status=PENDING AND ABS(amount-100.00)<0.001
+           AND pay_type=WECHAT AND expire_at>now ORDER BY created_at ASC LIMIT 1
+      │
+      ├─ 匹配成功 ──▶ UPDATE v3_order SET status=PAID
+      │               写 v3_order_status_log（来源：通知栏监听）
+      │               触发商户回调
+      │               返回 { matched:true, orderId, amount, payTime }
+      │
+      └─ 无匹配   ──▶ LOG_INFO 记录（供人工对账）
+                      返回 { matched:false, reason }
+
+【心跳 & 离线检测】：
+─────────────────────────────────────────────────────────
+ 设备每10s POST /api/wepay/v3/heart
+      { deviceId, battery, network, appVersion, timestamp, nonce, sign }
+      │
+      ▼
+ 更新 v3_device.last_heartbeat + Redis device:{deviceId} HASH
+      │
+      ▼
+ 定时任务每30s扫描 v3_device WHERE last_heartbeat < now-180s
+      │
+      ▼
+ 标记 online=false → AlertNotification 触发设备离线告警
+      推送渠道：钉钉Webhook / 企微Webhook / SMTP邮件（按 v3_system_config 配置）
+
+
+四、容灾与高可用设计
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  1. 服务高可用                                                                │
+│     ├─ 多实例部署：Nginx负载均衡，至少2个实例                                │
+│     ├─ 健康检查：自动摘除故障节点                                            │
+│     └─ 无状态设计：WebSocket连接信息存Redis，支持实例间漂移                  │
+│                                                                               │
+│  2. 数据高可用                                                                │
+│     ├─ MySQL主从复制：读写分离，从库故障自动切换                             │
+│     ├─ Redis哨兵/集群：自动故障转移                                          │
+│     ├─ RocketMQ高可用：NameServer集群+Broker主从同步，消息持久化             │
+│     └─ MinIO分布式部署：多副本存储，数据冗余                                 │
+│                                                                               │
+│  3. 降级策略                                                                  │
+│     ├─ WebSocket降级：WS断线时自动切换到HTTP轮询pending接口                  │
+│     ├─ OCR降级：识别失败时人工审核，或使用备用OCR引擎                        │
+│     ├─ RocketMQ降级：消息队列故障时同步处理，记录失败日志人工补偿            │
+│     ├─ 限流降级：过载时拒绝非核心接口（如统计查询），保障核心支付流程        │
+│     └─ 缓存降级：Redis故障时直接查数据库（性能下降但不影响功能）             │
+│                                                                               │
+│  4. 灾难恢复                                                                  │
+│     ├─ 数据库定时备份：每日全量+每小时增量，保留30天                         │
+│     ├─ RocketMQ消息备份：重要消息持久化到MySQL，可追溯补偿                   │
+│     ├─ 截图文件备份：MinIO跨区域复制，防止单点故障                           │
+│     ├─ 配置备份：系统配置版本化管理（Git）                                   │
+│     └─ 应急预案：故障演练、回滚流程、紧急联系人                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+
+六、性能优化策略
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  1. 接口性能优化                                                              │
+│     ├─ 数据库索引：DeviceID、订单号、时间戳建立联合索引                      │
+│     ├─ 查询优化：避免全表扫描，使用覆盖索引                                  │
+│     ├─ 连接池：数据库连接池、Redis连接池复用                                 │
+│     └─ 异步处理：耗时操作（OCR识别、截图压缩）放入消息队列异步处理           │
+│                                                                               │
+│  2. 缓存策略                                                                  │
+│     ├─ 热点数据缓存：设备在线状态、IP白名单、系统配置                        │
+│     ├─ 缓存预热：系统启动时加载常用配置到Redis                               │
+│     ├─ 缓存更新：配置变更时主动刷新缓存，避免脏读                            │
+│     └─ 缓存穿透防护：布隆过滤器拦截不存在的DeviceID查询                      │
+│                                                                               │
+│  3. WebSocket优化                                                             │
+│     ├─ 心跳优化：客户端30s心跳，服务端90s超时检测                            │
+│     ├─ 消息压缩：大消息启用gzip压缩，减少带宽占用                            │
+│     ├─ 连接复用：同一设备多商户共用一个WS连接                                │
+│     └─ 分片推送：大批量订单分批推送，避免消息积压                            │
+│                                                                               │
+│  4. 存储优化                                                                  │
+│     ├─ 截图压缩：上传时自动压缩，缩略图单独存储                              │
+│     ├─ 冷热分离：历史订单归档到冷存储，热数据保留近30天                      │
+│     ├─ 分库分表：订单表按月分表，设备表按DeviceID哈希分片                    │
+│     └─ 日志清理：审计日志保留90天，定时清理过期数据                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+
+七、安全加固措施
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  1. 传输安全                                                                  │
+│     ├─ HTTPS强制：生产环境强制TLS 1.2+，禁用弱加密套件                       │
+│     ├─ WSS加密：WebSocket使用wss://协议，防止中间人攻击                      │
+│     └─ 证书管理：Let's Encrypt自动续期，证书过期监控                         │
+│                                                                               │
+│  2. 访问控制                                                                  │
+│     ├─ IP白名单：生产环境严格限制IP，支持动态添加/删除                       │
+│     ├─ 设备黑名单：异常设备自动拉黑，支持手动解封                            │
+│     ├─ 商户隔离：不同商户数据完全隔离，防止越权访问                          │
+│     └─ 管理后台：RBAC权限控制，操作日志审计                                  │
+│                                                                               │
+│  3. 数据安全                                                                  │
+│     ├─ 敏感数据加密：密钥、RSA私钥使用AES256加密存储                         │
+│     ├─ 数据脱敏：日志中自动脱敏手机号、金额等敏感信息                        │
+│     ├─ SQL注入防护：使用参数化查询，禁止拼接SQL                              │
+│     └─ XSS防护：输出转义，CSP策略限制脚本执行                                │
+│                                                                               │
+│  4. 攻击防护                                                                  │
+│     ├─ DDoS防护：CDN加速+流量清洗，异常流量自动拦截                          │
+│     ├─ 暴力破解防护：登录失败5次锁定账号30分钟                               │
+│     ├─ 重放攻击防护：nonce+timestamp双重校验，窗口期300s                     │
+│     └─ 异常行为检测：单设备请求频率异常自动告警                              │
+└──────────────────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,80 @@
+version: "3.8"
+
+# ════════════════════════════════════════════════════════════════
+# WePay-Cpp 第三方支付系统 Docker Compose
+#
+# 默认只启动 wepay 主服务(SQLite)
+# 可选启动:
+#   docker-compose --profile with-redis    up -d   # 启动 Redis
+#   docker-compose --profile with-rabbit   up -d   # 启动 RabbitMQ
+#   docker-compose --profile with-postgres up -d   # 启动 PostgreSQL
+#   docker-compose --profile full          up -d   # 启动所有
+# ════════════════════════════════════════════════════════════════
+
+services:
+  wepay:
+    build: .
+    image: wepay-cpp:2.0
+    container_name: wepay-cpp
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./upload:/app/upload
+      - ./config.json:/app/config.json:ro
+    environment:
+      - TZ=Asia/Shanghai
+    # 下面两个 depends_on 默认注释，开启对应 profile 后会自动生效
+    # depends_on:
+    #   - redis
+    #   - rabbitmq
+
+  # ── 可选: Redis 缓存 ─────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: wepay-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    profiles: ["with-redis", "full"]
+
+  # ── 可选: RabbitMQ 消息队列 ──────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: wepay-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"  # 管理界面
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbit-data:/var/lib/rabbitmq
+    profiles: ["with-rabbit", "full"]
+
+  # ── 可选: PostgreSQL 数据库 ──────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: wepay-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: wepay
+      POSTGRES_PASSWORD: wepay123
+      POSTGRES_DB: wepay
+      TZ: Asia/Shanghai
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    profiles: ["with-postgres", "full"]
+
+volumes:
+  redis-data:
+  rabbit-data:
+  pg-data:
